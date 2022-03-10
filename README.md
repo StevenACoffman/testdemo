@@ -316,3 +316,217 @@ or
 
   [3]: https://tip.golang.org/doc/go1.7#testing
   [4]: https://tip.golang.org/pkg/testing/#hdr-Subtests_and_Sub_benchmarks
+
+### Dependency Injection
+
+A dependency can be anything that effects the behavior or outcome of your logic. A real production application commonly grows to have more than one stateful dependency like:
+
++ A database (or NoSQL K/V store)
++ A cache
++ One or more HTTP clients
++ A message queue
++ Cloud APIs
++ Secrets (database passwords, API credentials, etc.)
++ Logging, Metrics, Tracing
+
+You want different behavior for each of these types of dependencies in Prod vs. Staging vs. in Unit tests. 
+
+The easiest place to inject those dependencies is just instantiating things in inside of main. It's very straightforward. In your main method, at runtime your program should interrogate which environment it is running in from environment variables.
+ Pick an arbitrary but unlikely-to-be-in-use environment variable name like "MY_ORG_ENV" and set it to "prod" vs. "staging" vs. "unit", and panic if it's not one of those.
+
+The easiest form of dependency injection, is just to pass them as function arguments, and then you get all the compiler help for free.
+
+This can start to get cumbersome as the number of dependencies grows beyond more than a handful.
+
+##### Shove all the stateful dependencies into a server Struct
+The classic way to deal with lots of stateful dependencies in a HTTP Server application is to make all the HTTP handlers a method of the main Server struct and the handlers can just access the necessary dependencies from the server.
+```
+type Server struct {
+  db Database
+}
+
+func (s *Server) GetUsers(w http.ResponseWriter, r *http.Request) ([]string, errror) {
+users, _ := s.db.getUsers(ctx))
+...
+}
+```
+### Questionable Alternative Dependency Injection Techniques
+
+So some people don't like just passing things as arguments or putting them on a struct with receiver methods.
+
+If you have a good reason to add extra complexity, then read on.
+
+<details>
+  <summary>Click to expand!</summary>
+
+##### Stuff all the stateful dependencies into a "God Object" and pass that as an argument everywhere
+
+```
+type Deps struct {
+  Db Database
+}
+func GetUsers(deps *Deps) ([]string, errror) {
+  users, _ := deps.Db.getUsers(ctx))
+  ...
+}
+```
+
+##### Go interface wild!
+Instead of storing the stateful dependency directly, you can also make a passthrough interface
+with methods like `GetDB()` that returns the stateful dependency.
+```
+s.GetDB().db.getUsers(ctx))
+```
+This is more verbose, but allows you to add some dynamic behavior, like lazy-loading, if you really need that.
+
+##### (ab)Use the context.Context
+
+In an HTTP Server, the `http.Server`, every request can retrieve a `context.Context` by just calling `req.Context()`
+
+Idiomatically, context.Context is only for:
++ Cancellation signals
++ Deadlines
++ Request-scoped metadata that does not alter behaviour
+
+However, we *can* put arbitrary `interface{}` values into any context, and any values in the BaseContext of the `http.Server` will be inherited by the `context.Context` for every request.
+So we *can* inject shared, stateful dependencies into there if we really, really want to.
+
+Before BaseContext existed, Kayle Gishen [described injecting dependencies into the request context using a middleware function](https://www.youtube.com/watch?v=_KrV_VWP2n0) with [source code here](https://github.com/kayleg/yt-dependency-injection)
+and someone else [summarized it here](https://www.adityathebe.com/journal/5).
+
+There [are some obvious downsides to using context for dependency injection](https://ahmedalhulaibi.com/blog/go-context-misuse/).
++ Using `context.WithValue()` and `context.Value()` is actively choosing to give up information and type checking at compile time.
++ [Obfuscates input](https://ahmedalhulaibi.com/blog/go-context-misuse/#obfuscated-inputs) when reading method and function signatures.
++ [Creates implicit couplings](https://ahmedalhulaibi.com/blog/go-context-misuse/#implicit-and-unclear-temporal-coupling) which slows down refactoring.
++ [Leads to nil pointer exceptions](https://ahmedalhulaibi.com/blog/go-context-misuse/#nil-pointer-exceptions) causing development delays and service disruptions.
++ Unidiomatic - Bespoke solutions to common problems divorce you from benefiting from the wider ecosystem 
+
+You can mitigate these with various tricks.
+
+To get back the compiler type safety, add getter/setter helpers in other packages that define context keys as an *unexported* type. There's no way to set them to the wrong type,
+and only one way to retrieve these values:
+```
+type userCtxKeyType string
+
+const userCtxKey userCtxKeyType = "user"
+
+func WithUser(ctx context.Context, user *User) context.Context {
+  return context.WithValue(ctx, userCtxKey, user)
+}
+
+func GetUser(ctx context.Context) *User {
+  user, ok := ctx.Value(userCtxKey).(*User)
+  if !ok {
+    // Log this issue
+    return nil
+  }
+  return user
+}
+```
+
+To avoid obfuscating function inputs, before we ever actually use data from context values, we write a function to pull data from the context values and then pass that data into a function that explicitly states the data it requires. After doing this, the function that we call should never need to pull additional data out of the context that affects the flow of our application.
+
+##### Combine promiscuous interfacing and God Object and extend Context into MegaContext!
+In GraphQL resolvers where you have a `ctx context.Context` and HTTP handlers where you have a request that can give you the same,
+you can "upgrade" to a custom context.
+```
+var ktx interface {
+	customctx.Base
+	log.CustomContext
+	datastore.CustomContext
+} = customctx.Upgrade(ctx)
+...
+```
+You can then use it like this:
+```
+func GetUsers(ctx interface {
+  customctx.Base
+  customctx.DB
+  customctx.Service
+  customctx.Time
+  customctx.Log
+}) ([]string, errror) {
+...
+}
+```
+In order for this to work, you need even more tricks:
+
+```
+// We store the CustomContextas a Context.Value-style key in the go-context it
+// wraps, so that we can re-extract all the CustomContext goodies after someone
+// else wraps it go-context style (as, for example, the HTTP server and
+// middleware will do).  This type and key ensure, in the usual way, that
+// collisions in context-keys are impossible.
+//
+// The type of the value is *customContext.
+type _customContextKeyType string
+
+const _customContextKey _customContextKeyType = "customctx.customContext"
+
+type customContext struct {
+	// NOTE(benkraft): Do NOT replace Context after initialization; use
+	// WithContext instead.  (See comments there for why.)
+	context.Context
+	...
+}
+
+// Base contains the functionality to convert a CustomContext to and from an ordinary
+go-context: 
+//  + it ensures that CustomContexts are valid go-contexts 
+//  + it provides WithContext which can convert the other direction.
+type Base interface {
+	// Embedding context.Context is what allows us to use a KA context as a Go
+	// context.
+	context.Context
+
+	// WithContext replaces the Go-context in the CustomContext with another.
+	//
+	// This is useful if you want to create a modified context -- say add a
+	// deadline -- but keep using the CustomContext extras.  For example:
+	//	// Add a deadline to a CustomContext:
+	//	ktx = ktx.WithContext(context.WithDeadline(ktx, deadline))
+	//	// Add a context-value to a CustomContext:
+	//	ktx = ktx.WithContext(context.WithValue(ktx, key, value))
+	//	// Create a new background CustomContext (for a fire-and-forget call):
+	//	ktx = ktx.WithContext(context.Background())
+	//
+	//
+	// It's also used internally in Upgrade, to ensure that all the
+	// wrapping done as the context is passed through HTTP-land is applied when
+	// we re-extract the CustomContext.
+	WithContext(ctx context.Context) *customContext
+
+	// These replacers implement the clone-replace pattern used in tests, for
+	// cases where we also want to allow it in prod.
+	// WithHTTP is useful for clients that want to change cookie- or
+	// redirect-handling, for example.
+	WithHTTP(*http.Client) *customContext
+	// WithMemorystore lets clients install a mock memorystore pool.
+	WithMemorystore(*memorystore.Client) *customContext
+	// WithDatastore lets clients install a mock datastore client.
+	WithDatastore(datastore.Client) *customContext
+
+	// Detach replaces all request-specific context in this
+	// CustomContext with something that does not depend on the request.
+	//
+	// This is intended to be used when starting a go-routine that
+	// should last beyond the given request.  We want to make sure
+	// that the context isn't canceled when the request finishes.  We
+	// also want to ensure its logging is not associated with this
+	// request.  Detach does all this.  It returns a new context that
+	// is typed as context.Context but can be promoted to whatever
+	// type it was before the Detach() call.
+	//
+	// We want to make sure things using the detached context don't
+	// run forever, unless that's what you want, so we ask callers to
+	// pass in a timeout.  If you *want* to run forever, pass a zero
+	// timeout, and we'll just make the new context cancelable but not
+	// set a timeout.  In either case we return a cancel-function so
+	// you can cancel this context (and hopefully whatever goroutine
+	// is using it) manually.
+	Detach(timeout time.Duration) (context.Context, context.CancelFunc)
+}
+```
+
+</details>
+
