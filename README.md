@@ -1,11 +1,9 @@
+### Thoughts on testing in Go
 
 As the famous programmer [Stephen Stills once sang](https://en.wikipedia.org/wiki/Love_the_One_You%27re_With):
-> "🎶 And if you can't test with the code you love honey<br>
+> "🎶 And if you can't test all the code you love honey<br>
 Love the tests you code, Love the tests you code,<br>
 Love the tests you code, Love the tests you code.🎵"
-
-This started from me cribbing notes from [this excellent article](https://symflower.com/en/company/blog/2022/better-table-driven-testing/)
-and the [Reddit Comments](https://www.reddit.com/r/golang/comments/t3hhh6/take_on_a_better_unit_test_style/).
 
 ### Example of testing some Go code
 Let us assume you have something simple to test like this:
@@ -350,9 +348,9 @@ users, _ := s.db.getUsers(ctx))
 ...
 }
 ```
-### Questionable Alternative Dependency Injection Techniques
+### Alternative Dependency Injection Techniques
 
-So some people don't like just passing things as arguments or putting them on a struct with receiver methods.
+Some people don't like just passing things as arguments or putting them on a struct with receiver methods.
 
 If you have a good reason to add extra complexity, then read on.
 
@@ -372,36 +370,35 @@ func GetUsers(deps *Deps) ([]string, errror) {
 ```
 
 ##### Go interface wild!
-Instead of storing the stateful dependency directly, you can also make a passthrough interface
-with methods like `GetDB()` that returns the stateful dependency.
+Instead of storing the stateful dependency directly, you can also make methods like `GetDB()` that returns the stateful dependency.
 ```
 s.GetDB().db.getUsers(ctx))
 ```
 This is more verbose, but allows you to add some dynamic behavior, like lazy-loading, if you really need that.
 
-##### (ab)Use the context.Context
+##### Use the context.Context
 
 In an HTTP Server, the `http.Server`, every request can retrieve a `context.Context` by just calling `req.Context()`
 
-Idiomatically, context.Context is only for:
+Idiomatically, `context.Context` is only for:
 + Cancellation signals
 + Deadlines
 + Request-scoped metadata that does not alter behaviour
 
 However, we *can* put arbitrary `interface{}` values into any context, and any values in the BaseContext of the `http.Server` will be inherited by the `context.Context` for every request.
-So we *can* inject shared, stateful dependencies into there if we really, really want to.
+So we *can* inject shared, stateful dependencies into there if we really want to.
 
-Before BaseContext existed, Kayle Gishen [described injecting dependencies into the request context using a middleware function](https://www.youtube.com/watch?v=_KrV_VWP2n0) with [source code here](https://github.com/kayleg/yt-dependency-injection)
+Before `http.Server.BaseContext` existed, Kayle Gishen [described injecting dependencies into the request context using a middleware function](https://www.youtube.com/watch?v=_KrV_VWP2n0) with [source code here](https://github.com/kayleg/yt-dependency-injection)
 and someone else [summarized it here](https://www.adityathebe.com/journal/5).
 
-There [are some obvious downsides to using context for dependency injection](https://ahmedalhulaibi.com/blog/go-context-misuse/).
+There [are some downsides to using context for dependency injection](https://ahmedalhulaibi.com/blog/go-context-misuse/).
 + Using `context.WithValue()` and `context.Value()` is actively choosing to give up information and type checking at compile time.
 + [Obfuscates input](https://ahmedalhulaibi.com/blog/go-context-misuse/#obfuscated-inputs) when reading method and function signatures.
 + [Creates implicit couplings](https://ahmedalhulaibi.com/blog/go-context-misuse/#implicit-and-unclear-temporal-coupling) which slows down refactoring.
 + [Leads to nil pointer exceptions](https://ahmedalhulaibi.com/blog/go-context-misuse/#nil-pointer-exceptions) causing development delays and service disruptions.
-+ Unidiomatic - Bespoke solutions to common problems divorce you from benefiting from the wider ecosystem 
++ Not idiomatic - Bespoke solutions to common problems divorce you from benefiting from the wider ecosystem 
 
-You can mitigate these with various tricks.
+You can mitigate some of these with various tricks.
 
 To get back the compiler type safety, add getter/setter helpers in other packages that define context keys as an *unexported* type. There's no way to set them to the wrong type,
 and only one way to retrieve these values:
@@ -426,7 +423,7 @@ func GetUser(ctx context.Context) *User {
 
 To avoid obfuscating function inputs, before we ever actually use data from context values, we write a function to pull data from the context values and then pass that data into a function that explicitly states the data it requires. After doing this, the function that we call should never need to pull additional data out of the context that affects the flow of our application.
 
-##### Combine promiscuous interfacing and God Object and extend Context into MegaContext!
+##### Combine interfaces and God Object and extend Context into MegaContext!
 In GraphQL resolvers where you have a `ctx context.Context` and HTTP handlers where you have a request that can give you the same,
 you can "upgrade" to a custom context.
 ```
@@ -449,6 +446,10 @@ func GetUsers(ctx interface {
 ...
 }
 ```
+The benefit here is that you are as explicit about the defining the dependencies of the function as if you had
+passed them as individual arguments. While it makes the function definition even more verbose than individual arguments, it is much *less* verbose to *call* `GetUsers(ktx)`.
+You are still obscuring the dependencies at the call site.
+
 In order for this to work, you need even more tricks:
 
 ```
@@ -529,4 +530,63 @@ type Base interface {
 ```
 
 </details>
+
+### Testing Terms
+
++ **Stub** - an object that provides predefined answers to method calls.
++ **Mock** - an object on which you set expectations.
++ **Fake** - an object with limited capabilities (for the purposes of testing), e.g. a fake web service.
+
+Test Double is the general term for stubs, mocks and fakes. A mock is single use, but a fake can be reused.
+
++ **Test Fixture** -  a well known and fixed environment in which tests are run so that results are repeatable. Some people call this the test context.
+
+##### Examples of fixtures:
+
++ Preparation of input data and set-up/creation of fake or mock objects
++ Loading a database with a specific, known set of data
++ Erasing a hard disk and installing a known clean operating system installation
++ Copying a specific known set of files
+
+Test fixtures contribute to setting up the system for the testing process by providing it with all the necessary data for initialization. The setup using fixtures is done to satisfy any preconditions there may be for the code under test. Fixtures allow us to reliably and repeatably create the state our code relies on upon without worrying about the details.
+### HTTP client testing techniques:
++ [Unit Testing http client in Go](http://hassansin.github.io/Unit-Testing-http-client-in-Go)
++ [a way to test http client in go](https://blog.bullgare.com/2020/02/a-way-to-test-http-client-in-go/)
+
+1.  Using `httptest.Server`:
+    `httptest.Server` allows us to create a local HTTP server and listen for any requests. When starting, the server chooses any available open port and uses that. So we need to get the URL of the test server and use it instead of the actual service URL.
+
+2. [Accept a Doer as a parameter](https://www.0value.com/let-the-doer-do-it)
+   The Doer is a single-method interface, as is often the case in Go:
+   ```
+   type Doer interface {
+       Do(*http.Request) (*http.Response, error)
+   }
+   ```
+3. By Replacing `http.Transport`:
+   Transport specifies the mechanism by which individual HTTP requests are made. Instead of using the default http.Transport, we’ll replace it with our own implementation. To implement a transport, we’ll have to implement http.RoundTripper interface. From the documentation:
+   ```
+   func Test_Mine(t *testing.T) {
+       ...
+       client := httpClientWithRoundTripper(http.StatusOK, "OK")
+       ...
+   }
+
+   type roundTripFunc func(req *http.Request) *http.Response
+
+   func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+       return f(req), nil
+   }
+
+   func httpClientWithRoundTripper(statusCode int, response string) *http.Client {
+       return &http.Client{
+           Transport: roundTripFunc(func(req *http.Request) *http.Response {
+               return &http.Response{
+                   StatusCode: statusCode,
+                   Body:       ioutil.NopCloser(bytes.NewBufferString(response)),
+               }
+           }),
+       }
+   }
+   ```
 
