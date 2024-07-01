@@ -200,7 +200,7 @@ func TestIsSorted(t *testing.T) {
 
 </details>
 
-The Symflower-Style is an interesting testing pattern that also appears in https://github.com/hashicorp/consul 
+The [Symflower-Style](https://symflower.com/en/company/blog/2022/better-table-driven-testing/) is an interesting testing pattern that also appears in https://github.com/hashicorp/consul 
 with only slight variations. Some examples in the wild can be seen here:
 
 + [consul/leader_connect_test.go#L1251-L1267](https://github.com/hashicorp/consul/blob/42ec34d/agent/consul/leader_connect_test.go#L1251-L1267) - uses the same ordering (testCase type, then function, then cases), but not the function call to replace the slice and for loop
@@ -224,6 +224,137 @@ func runCase(t *testing.T, name string, fn func(t *testing.T)) {
 	})
 }
 ```
+### f-tests
+[VictoriaMetrics](https://github.com/VictoriaMetrics/VictoriaMetrics) uses a [more succinct form](https://valyala.medium.com/f-tests-as-a-replacement-for-table-driven-tests-in-go-8814a8b19e9e) of the symflower style.
+
++ f() doesn’t accept t *testing.T arg, since it can use the corresponding arg from the outer test function.
++ Avoids having to come up with a good name for every test case
++ The actual test code is located at the beginning of f-test, so it is easy to read and understand it before going to test cases.
++ The actual test code doesn't depend on some testcase struct fields — all the inputs and the expected outputs are passed as regular args to f() function. This allows avoiding unnecessary level of indirection and writing simpler code (the testcase struct still can be defined in rare cases if f() accepts too many args — then these args can be defined in the testcase struct, which is then passed to f()).
+
+<details>
+  <summary>Click to expand!</summary>
+
+```
+func TestIsSortedF(t *testing.T) {
+	f := func(array []int, expected bool) {
+		t.Helper()
+		actual := IsSorted(array)
+		require.Equal(t, expected, actual)
+	}
+
+	f([]int{},true)
+	f([]int{0},true)
+	f([]int{0, 1},true) // actually true, but we want to see failures
+	f([]int{1, 0},false) // actually false, but we want to see failures
+}
+```
+</details>
+
+##### Common questions about f-tests
+
++ **How should f-tests be used for functions that may return error?**
+  
+  It is recommended to write two test functions — one for testing failure cases with the `_Failure` suffix in its name, and another one for testing success cases with the `_Success` suffix in its name. This is better than mixing success and failure cases in a single function since failure test cases are usually more clear to test in a separate function. For example:
+  
+  <details>
+    <summary>Click to expand!</summary>
+    
+    ```go
+    func TestSomeFunc_Failure(t *testing.T) {
+      f := func(input string) {
+        t.Helper()
+    
+        _, err := SomeFunc(input)
+        if err == nil {
+          t.Fatalf("expecting non-nil error")
+        }
+      }
+    
+      f("broken_input_1")
+      f("broken_input_2")
+    }
+    
+    func TestSomeFunc_Success(t *testing.T) {
+      f := func(input, resultExpected string) {
+        t.Helper()
+    
+        result, err := SomeFunc(input)
+        if err != nil {
+          t.Fatalf("unexpected error: %s", err)
+        }
+        if result != resultExpected {
+          t.Fatalf("unexpected result; got %q; want %q", result, resultExpected)
+        }
+      }
+    
+      f("input_1", "result_1")
+      f("input_2", "result_2")
+    }
+    ```
+  </details>
+
++ **How can test functions accept and/or produce deeply nested non-trivial structs?**
+  
+  The straightforward approach — to prepare these non-trivial structs before every `f()` call — may result in code bloat and duplication. The better way is to figure out some simple args for `f()` function, which then could be converted to the needed non-trivial structs by `f()` itself before calling the tested function:
+
+  <details>
+    <summary>Click to expand!</summary>
+    
+    ```go
+    func TestFuncWithNonTrivialArgs(t *testing.T) {
+      f := func(inputMarshaled, resultMarshaledExpected string) {
+        t.Helper()
+    
+        input := unmarshalInputToComplexStruct(inputMarshaled)
+    
+        result := FuncWithNonTrivialArgs(input)
+    
+        resultMarshaled := marshalComplexResult(result)
+        if resultMarshaled != resultMarshaledExpected {
+          t.Fatalf("unexpected result; got %q; want %q", resultMarshaled, resultMarshaledExpected)
+        }
+      }
+    
+      f("foo", "bar")
+      f("abc", "def")
+    }
+    ```
+  </details>
+
++ **How can subtests be used in f-tests?**
+  
+  It isn’t recommended to do this in the general case, since this may unnecessarily complicate the test code without giving any practical benefits. But if you need subtests (for example, you need to execute sub-tests separately by passing their names to `go test -run=…` command for some reason), then just wrap every `f()` call into [t.Run()](https://pkg.go.dev/testing#T.Run) call and pass subtest’s `t` arg as the first arg to `f()`:
+  
+  <details>
+    <summary>Click to expand!</summary>
+    
+    ```go
+    func TestSomeFuncWithSubtests(t *testing.T) {
+      f := func(t *testing.T, input, outputExpected string) {
+        t.Helper()
+      
+        output := SomeFunc(input)
+        if output != outputExpected {
+          t.Fatalf("unexpected output; got %q; want %q", output, outputExpected)
+        }
+      }
+    
+      t.Run("first_subtest", func(t *testing.T) {
+        f(t, "foo", "bar")
+      }
+    
+      t.Run("second_subtest", func(t *testing.T) {
+        f(t, "baz", "abc")
+      }
+    }
+    ```
+  </details>
+
++ **When isn’t it recommended to use f-tests?**
+  
+  If test results depend on the order of `f()` calls, then it is a bad idea to use **f-tests**. In general, **f-tests** are good for [classical unit testing](https://en.wikipedia.org/wiki/Unit_testing) of multiple cases, while they may be not so good for other test types.
+
 
 ### Testify Testing Framework
 ##### Testify Suites
