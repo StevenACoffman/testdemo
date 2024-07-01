@@ -23,6 +23,8 @@ func IsSorted(data []int) bool {
 ```
 How do you unit test this in Go?
 
+---
+
 ### Beginner SideNote: AAA pattern
 The AAA (Arrange, Act, Assert) pattern is a common way of writing unit tests for a method under test.
 
@@ -34,6 +36,8 @@ Sometimes it is more natural to think of these as `Given`/`When`/`Then`, especia
 + Given = Arrange
 + When = Act
 + Then = Assert
+
+---
 
 ### Basic Function Per Test Case Style
 
@@ -97,6 +101,8 @@ Helpful Testing methods:
 + 🧹 `t.Cleanup`, for cleaning up state in between tests
 + 🙈 `t.Helper`, mark this function to be skipped when printing stacktraces.
 
+---
+
 ### Standard Go Table-Driven style
 This is the style you see most often in Go projects. It’s already table-driven, which is a huge improvement to the function-per-test-case style, since it reduces the amount of redundant code. However, there are still disadvantages:
 
@@ -137,6 +143,7 @@ func TestStdGoIsSorted1(t *testing.T) {
 
 </details>
 
+---
 
 ### Symflower-style table-driven unit tests
 By calling a validation function directly instead of using a for loop, you can pinpoint problematic cases with stacktraces that have accurate line numbers.
@@ -224,10 +231,13 @@ func runCase(t *testing.T, name string, fn func(t *testing.T)) {
 	})
 }
 ```
+
+---
+
 ### f-tests
 [VictoriaMetrics](https://github.com/VictoriaMetrics/VictoriaMetrics) uses a [more succinct form](https://valyala.medium.com/f-tests-as-a-replacement-for-table-driven-tests-in-go-8814a8b19e9e) of the symflower style.
 
-+ f() doesn’t accept t *testing.T arg, since it can use the corresponding arg from the outer test function.
++ f() doesn’t accept `t *testing.T` arg, since it can use the corresponding arg from the outer test function.
 + Avoids having to come up with a good name for every test case
 + The actual test code is located at the beginning of f-test, so it is easy to read and understand it before going to test cases.
 + The actual test code doesn't depend on some testcase struct fields — all the inputs and the expected outputs are passed as regular args to f() function. This allows avoiding unnecessary level of indirection and writing simpler code (the testcase struct still can be defined in rare cases if f() accepts too many args — then these args can be defined in the testcase struct, which is then passed to f()).
@@ -355,9 +365,118 @@ func TestIsSortedF(t *testing.T) {
   
   If test results depend on the order of `f()` calls, then it is a bad idea to use **f-tests**. In general, **f-tests** are good for [classical unit testing](https://en.wikipedia.org/wiki/Unit_testing) of multiple cases, while they may be not so good for other test types.
 
+---
+### Functional Table Driven Tests
+
+Table driven tests shine when the input data to a function consists of primitive arguments.
+
+However, if your input and output parameters are structs, the test case in the table might be more than a few lines of code. This leads to tables that are pretty hard to read, which defeats the first purpose of table-driven tests: readability.
+
+Another issue is each test case in the table consists of duplicates. Because even though the input parameters are a struct, most of the time, we only change a single field in the struct (or remove fields in our case).
+
+This leads to copying/pasting whole test cases to only change a single field, which leads to repetition, poor readability, and maintainability. Adding a new edge case or refactoring the table becomes incredibly tedious.
+
+See https://arslan.io/2022/12/04/functional-table-driven-tests-in-go/
+
+How can we improve the situation?
+
+##### Functional Table Driven Tests Solution
+
+One trick to make the table shorter and more readable is defining base values of the structs and using function types to modify the base value for each test case. 
+
+<details>
+  <summary>Click to expand!</summary>
+The most significant changes are; first, we changed test from a struct type to a function type:
+
+```go
+func TestValidate(t *testing.T) {
+        tests := []struct {
+                name string
+-               pod  *corev1.Pod
++               pod  func(pod *corev1.Pod)
+                err  string
+        }{
+```
+
+The idea is that instead of defining a full-filled Pod struct, we'll assume it's already valid and only change the fields we're interested in. By default, the Pod is valid (`testPod()` is a helper function that returns a valid Pod value). Instead of passing the `tt.pod` value to `validate()`, we pass the Pod returned by `testPod`, but also modify it when `tt.pod()` is defined:
+
+```go
+        for _, tt := range tests {
+                tt := tt
+                t.Run(tt.name, func(t *testing.T) {
+-                       err := validate(tt.pod)
++                       pod := testPod()
++                       if tt.pod != nil {
++                               tt.pod(pod)
++                       }
++
++                       err := validate(pod)
+```
+
+Here you can see that it's the same test, however, with a significant change. We no longer define the struct with all its nested fields in each case. Instead, we define a function that we can use to modify only specific fields of an already defined struct.
+
+This approach is powerful when you apply it to the remaining cases. Let's change our test for the remaining cases, where we check the `container.Ports` and `container.Images` fields:
+
+```go
+func TestValidate(t *testing.T) {
+	tests := []struct {
+		name string
+		pod  func(pod *corev1.Pod)
+		err  string
+	}{
+		{
+			name: "valid pod",
+		},
+		{
+			name: "invalid pod, image is not set",
+			pod: func(pod *corev1.Pod) {
+				pod.Spec.Containers[0].Image = ""
+			},
+			err: "container.Image is empty",
+		},
+		{
+			name: "invalid pod, ports is not set",
+			pod: func(pod *corev1.Pod) {
+				pod.Spec.Containers[0].Ports = nil
+			},
+			err: "container.Ports is not set",
+		},
+	}
+...
+```
+
+Let's run the tests:
+
+```go
+$ go test -v
+=== RUN   TestValidate
+=== RUN   TestValidate/valid_pod
+=== RUN   TestValidate/invalid_pod,_image_is_not_set
+=== RUN   TestValidate/invalid_pod,_ports_is_not_set
+--- PASS: TestValidate (0.00s)
+    --- PASS: TestValidate/valid_pod (0.00s)
+    --- PASS: TestValidate/invalid_pod,_image_is_not_set (0.00s)
+    --- PASS: TestValidate/invalid_pod,_ports_is_not_set (0.00s)
+PASS
+ok      demo    0.556s
+
+```
+
+</details>
+Here is the final test code:
+
+[https://go.dev/play/p/Uzspa-PtHjd](https://go.dev/play/p/Uzspa-PtHjd?ref=arslan.io)
+
+Previously we had to copy/paste the whole struct and only modify the lines, but now, as you see, with just a few lines, we can achieve the same result. It also reads a lot better because you can see at a glance which fields you have modified for a particular test case.
+
+This pattern is also very flexible. In our test, we assumed a Pod is, by default, valid. But you can also assume the opposite, where the Pod is not valid by default, and you change the fields, so it becomes valid. You can also use function types for the output rather than the input. In our example, our `validate()` function only returns an `error` type, hence it's not needed. But if you return a complex, large struct, you can also use a function type for the return type in the table.
 
 ### Testify Testing Framework
 ##### Testify Suites
+In integration tests, there is often a lot of shared setup, e.g. database fixtures. Repeating that for each test
+is a maintenance and readability burden. Testify has suites that might be helpful for integration tests, but are probably harmful
+in unit tests.
+
 A `testify` [suite](https://pkg.go.dev/github.com/stretchr/testify/suite) works by taking in a `*testing.T` value and running each suite method whose name starts with `Test` as a subtest.
 
 + Testify `suite` definitions use struct embedding to define the suite, and absorb the built-in basic suite functionality from testify
