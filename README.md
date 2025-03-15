@@ -143,6 +143,16 @@ func TestStdGoIsSorted1(t *testing.T) {
 
 </details>
 
+
+---
+
+## Everything after this is not ordered in increasing goodness!
+
+People have debated things and come up with a lot of different solutions. Most solutions are both great and terrible since they are **great** solutions would be **terribly** inappropriate for _your_ problems.
+
+For instance, there are variations on table-driven tests to mitigate the disadvantages that might work great in some contexts.
+There are other contexts when it is better to do things completely differently.
+ 
 ---
 
 ### Symflower-style table-driven unit tests
